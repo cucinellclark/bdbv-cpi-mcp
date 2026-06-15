@@ -28,19 +28,6 @@ The installer creates a `.venv`, installs all dependencies (including the ESM SD
 
 ## Usage
 
-**HTTP (streamable-http) with OAuth:**
-
-```bash
-./start.sh
-```
-
-Starts on `0.0.0.0:12009` by default. Configure with environment variables:
-
-- `MCP_HOST` / `MCP_PORT` — bind address and port
-- `PUBLIC_BASE_URL` — public URL for OAuth redirects (default: `https://dev-9.bv-brc.org`)
-
-**STDIO (for direct LLM client integration):**
-
 ```bash
 .venv/bin/python -m bdbv_cpi_mcp.server stdio
 ```
@@ -61,9 +48,9 @@ Alternatively, place your Biohub token in `biohub_api_key.txt` at the project ro
 
 ```
 src/bdbv_cpi_mcp/
-├── server.py    # MCP server entry point, OAuth middleware
+├── server.py    # MCP server entry point
 ├── config.py    # Configuration and API token management
-├── auth.py      # OAuth 2.1 provider (auto-approve, no real auth)
+├── auth.py      # OAuth provider
 └── tools/
     ├── blast.py # NCBI BLAST search and result parsing
     ├── mafft.py # MAFFT multiple sequence alignment
