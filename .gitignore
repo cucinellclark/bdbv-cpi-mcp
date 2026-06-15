@@ -12,5 +12,9 @@ build/
 # Virtual environment
 .venv/
 
+# uv
+uv.lock
+.python-version
+
 # Editor
 .ruff_cache/
