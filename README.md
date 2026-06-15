@@ -71,6 +71,7 @@ src/bdbv_cpi_mcp/
 ```
 
 ## Local MCP Server Config
+```
 {
   "mcpServers": {
     "bdbv-cpi-mcp": {
@@ -83,3 +84,4 @@ src/bdbv_cpi_mcp/
     }
   }
 }
+```
