@@ -1,0 +1,16 @@
+# API keys / secrets
+biohub_api_key.txt
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Editor
+.ruff_cache/
