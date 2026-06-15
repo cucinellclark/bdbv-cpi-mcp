@@ -17,9 +17,13 @@ _FOLD_MODELS = {
 }
 
 _EMBED_MODELS = {
-    "esmc_300m",
-    "esmc_600m",
-    "esmc_6b",
+    "esmc-300m-2024-12": "esmc-300m-2024-12",
+    "esmc-600m-2024-12": "esmc-600m-2024-12",
+    "esmc-6b-2024-12": "esmc-6b-2024-12",
+    # Backwards-compatible aliases used by older ESM SDK constants.
+    "esmc_300m": "esmc-300m-2024-12",
+    "esmc_600m": "esmc-600m-2024-12",
+    "esmc_6b": "esmc-6b-2024-12",
 }
 
 
@@ -57,6 +61,18 @@ def _get_client(model: str):
 
     token = get_biohub_token()
     return ESM3ForgeInferenceClient(
+        model=model,
+        url=BIOHUB_API_URL,
+        token=token,
+    )
+
+
+def _get_esmc_client(model: str):
+    """Create an ESMCForgeInferenceClient."""
+    from esm.sdk import esmc_client
+
+    token = get_biohub_token()
+    return esmc_client(
         model=model,
         url=BIOHUB_API_URL,
         token=token,
@@ -165,7 +181,7 @@ async def esmfold_predict(
 @mcp.tool()
 async def esm_embeddings(
     sequence: str,
-    model: str = "esmc_600m",
+    model: str = "esmc-600m-2024-12",
 ) -> str:
     """Extract protein language model embeddings using ESMC.
 
@@ -176,9 +192,9 @@ async def esm_embeddings(
         sequence: Protein amino acid sequence (single-letter codes).
                   Can include a FASTA header line starting with '>'.
         model: ESMC model variant. Options:
-               - esmc_300m (fastest, smallest)
-               - esmc_600m (balanced, recommended)
-               - esmc_6b (most powerful, slowest)
+               - esmc-300m-2024-12 (fastest, smallest)
+               - esmc-600m-2024-12 (balanced, recommended)
+               - esmc-6b-2024-12 (most powerful, slowest)
     """
     err = _validate_sequence(sequence)
     if err:
@@ -186,7 +202,8 @@ async def esm_embeddings(
 
     seq = _clean_sequence(sequence)
 
-    if model not in _EMBED_MODELS:
+    api_model = _EMBED_MODELS.get(model)
+    if api_model is None:
         return (
             f"Error: Invalid model '{model}'. "
             f"Must be one of: {', '.join(sorted(_EMBED_MODELS))}"
@@ -205,7 +222,7 @@ async def esm_embeddings(
             LogitsConfig,
         )
 
-        client = _get_client(model)
+        client = _get_esmc_client(api_model)
         protein = ESMProtein(sequence=seq)
 
         # Encode the protein to tensor
@@ -237,7 +254,7 @@ async def esm_embeddings(
             dim = len(emb_list)
             header = (
                 f"ESMC Protein Embedding\n"
-                f"  Model: {model}\n"
+                f"  Model: {api_model}\n"
                 f"  Sequence length: {len(seq)} residues\n"
                 f"  Embedding dimension: {dim}\n\n"
             )
