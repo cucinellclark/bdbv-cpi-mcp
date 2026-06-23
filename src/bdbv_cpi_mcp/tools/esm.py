@@ -98,6 +98,7 @@ async def esmfold_predict(
                 url,
                 json=payload,
                 headers={"Content-Type": "application/json"},
+                follow_redirects=True,
             )
             response.raise_for_status()
 
