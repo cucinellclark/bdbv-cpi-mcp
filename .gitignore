@@ -16,5 +16,8 @@ build/
 uv.lock
 .python-version
 
+# Proxy (deployed separately on ash)
+proxy/
+
 # Editor
 .ruff_cache/

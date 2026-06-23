@@ -1,30 +1,15 @@
-"""ESM tools: structure prediction (ESMFold) and protein embeddings (ESMC)."""
+"""ESM tools: structure prediction (ESMFold2) and protein embeddings."""
 
-import asyncio
 import json
-import re
-import sys
+import httpx
 
-from bdbv_cpi_mcp.config import get_biohub_token, BIOHUB_API_URL
+from bdbv_cpi_mcp.config import ESM_FOLD_URL
 from bdbv_cpi_mcp.server import mcp
 
 _VALID_AA = set("ACDEFGHIKLMNPQRSTVWY")
 
-_FOLD_MODELS = {
-    "esm3-open",
-    "esm3-medium",
-    "esm3-large",
-}
-
-_EMBED_MODELS = {
-    "esmc-300m-2024-12": "esmc-300m-2024-12",
-    "esmc-600m-2024-12": "esmc-600m-2024-12",
-    "esmc-6b-2024-12": "esmc-6b-2024-12",
-    # Backwards-compatible aliases used by older ESM SDK constants.
-    "esmc_300m": "esmc-300m-2024-12",
-    "esmc_600m": "esmc-600m-2024-12",
-    "esmc_6b": "esmc-6b-2024-12",
-}
+# Timeout for folding requests (can be slow for long sequences)
+_REQUEST_TIMEOUT = 600.0  # 10 minutes
 
 
 def _validate_sequence(sequence: str) -> str | None:
@@ -55,50 +40,31 @@ def _clean_sequence(sequence: str) -> str:
     return sequence.upper().replace(" ", "").replace("\n", "")
 
 
-def _get_client(model: str):
-    """Create an ESM3ForgeInferenceClient."""
-    from esm.sdk.forge import ESM3ForgeInferenceClient
-
-    token = get_biohub_token()
-    return ESM3ForgeInferenceClient(
-        model=model,
-        url=BIOHUB_API_URL,
-        token=token,
-    )
-
-
-def _get_esmc_client(model: str):
-    """Create an ESMCForgeInferenceClient."""
-    from esm.sdk import esmc_client
-
-    token = get_biohub_token()
-    return esmc_client(
-        model=model,
-        url=BIOHUB_API_URL,
-        token=token,
-    )
-
-
 @mcp.tool()
 async def esmfold_predict(
     sequence: str,
-    model: str = "esm3-open",
-    num_steps: int = 20,
+    chain_id: str = "A",
+    num_loops: int = 3,
+    num_sampling_steps: int = 50,
+    num_diffusion_samples: int = 1,
+    seed: int = 0,
 ) -> str:
-    """Predict 3D protein structure from an amino acid sequence using ESM3.
+    """Predict 3D protein structure from an amino acid sequence using ESMFold2.
 
-    Returns the predicted structure as a PDB string with confidence scores.
-    Uses the ESM3 model via the Biohub platform API (no local GPU needed).
+    Returns the predicted structure as an mmCIF string with confidence scores
+    (pLDDT, pTM, ipTM).
 
     Args:
         sequence: Protein amino acid sequence (single-letter codes).
                   Can include a FASTA header line starting with '>'.
-        model: Model variant. Options:
-               - esm3-open (fast, good for most uses)
-               - esm3-medium
-               - esm3-large (highest quality, slower)
-        num_steps: Number of generation steps (1-50, higher = better quality
-                   but slower). Default 20.
+        chain_id: Chain identifier for the output structure. Default "A".
+        num_loops: Number of recycling loops. Higher values may improve
+                   quality. Default 3.
+        num_sampling_steps: Number of diffusion sampling steps (1-50).
+                            Higher = better quality but slower. Default 50.
+        num_diffusion_samples: Number of independent diffusion samples to
+                               generate. Default 1.
+        seed: Random seed for reproducibility. Default 0.
     """
     # Validate
     err = _validate_sequence(sequence)
@@ -107,73 +73,70 @@ async def esmfold_predict(
 
     seq = _clean_sequence(sequence)
 
-    if model not in _FOLD_MODELS:
-        return (
-            f"Error: Invalid model '{model}'. "
-            f"Must be one of: {', '.join(sorted(_FOLD_MODELS))}"
-        )
+    if not 1 <= num_sampling_steps <= 50:
+        return "Error: num_sampling_steps must be between 1 and 50."
 
-    if not 1 <= num_steps <= 50:
-        return "Error: num_steps must be between 1 and 50."
+    if num_loops < 1:
+        return "Error: num_loops must be at least 1."
 
-    if len(seq) > 1024:
-        return (
-            f"Error: Sequence is {len(seq)} residues. "
-            f"Maximum supported length is 1024 residues for API inference."
-        )
+    if num_diffusion_samples < 1:
+        return "Error: num_diffusion_samples must be at least 1."
+
+    payload = {
+        "sequence": seq,
+        "chain_id": chain_id,
+        "num_loops": num_loops,
+        "num_sampling_steps": num_sampling_steps,
+        "num_diffusion_samples": num_diffusion_samples,
+        "seed": seed,
+    }
 
     try:
-        from esm.sdk.api import (
-            ESMProtein,
-            ESMProteinError,
-            GenerationConfig,
-        )
+        url = f"{ESM_FOLD_URL}/fold"
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
+            response = await client.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
 
-        client = _get_client(model)
-        protein = ESMProtein(sequence=seq)
+        data = response.json()
 
-        config = GenerationConfig(
-            track="structure",
-            num_steps=num_steps,
-        )
+        # Build header with confidence metrics
+        plddt_mean = data.get("plddt_mean")
+        ptm = data.get("ptm")
+        iptm = data.get("iptm")
+        mmcif = data.get("mmcif", "")
 
-        # Run in thread pool since the SDK is synchronous
-        result = await asyncio.to_thread(client.generate, protein, config)
-
-        if isinstance(result, ESMProteinError):
-            return f"Error from ESM API: {result.error_msg}"
-
-        # Get PDB string
-        pdb_str = result.to_pdb_string()
-
-        # Extract confidence metrics
-        plddt = result.plddt
-        ptm = result.ptm
-
-        header = f"ESM3 Structure Prediction\n"
-        header += f"  Model: {model}\n"
+        header = "ESMFold2 Structure Prediction\n"
         header += f"  Sequence length: {len(seq)} residues\n"
-        header += f"  Generation steps: {num_steps}\n"
+        header += f"  Chain ID: {chain_id}\n"
+        header += f"  Sampling steps: {num_sampling_steps}\n"
+        header += f"  Loops: {num_loops}\n"
+        header += f"  Diffusion samples: {num_diffusion_samples}\n"
+        header += f"  Seed: {seed}\n"
 
+        if plddt_mean is not None:
+            header += f"  Mean pLDDT: {float(plddt_mean):.2f}\n"
         if ptm is not None:
-            header += f"  pTM score: {float(ptm):.3f}\n"
-        if plddt is not None:
-            try:
-                import torch
-
-                if isinstance(plddt, torch.Tensor):
-                    mean_plddt = float(plddt.mean())
-                else:
-                    mean_plddt = float(sum(plddt) / len(plddt))
-                header += f"  Mean pLDDT: {mean_plddt:.1f}\n"
-            except Exception:
-                pass
+            header += f"  pTM score: {float(ptm):.4f}\n"
+        if iptm is not None:
+            header += f"  ipTM score: {float(iptm):.4f}\n"
 
         header += "\n"
-        return header + pdb_str
+        return header + mmcif
 
-    except ValueError as e:
-        return f"Error: {e}"
+    except httpx.HTTPStatusError as e:
+        return (
+            f"Error from ESMFold2 server (HTTP {e.response.status_code}): "
+            f"{e.response.text}"
+        )
+    except httpx.ConnectError:
+        return (
+            f"Error: Could not connect to ESMFold2 server at {ESM_FOLD_URL}. "
+            f"Ensure the proxy is running on ash and accessible."
+        )
     except Exception as e:
         return f"Error during structure prediction: {type(e).__name__}: {e}"
 
@@ -181,96 +144,18 @@ async def esmfold_predict(
 @mcp.tool()
 async def esm_embeddings(
     sequence: str,
-    model: str = "esmc-600m-2024-12",
 ) -> str:
-    """Extract protein language model embeddings using ESMC.
+    """Extract protein language model embeddings using the ESM server.
 
-    Returns the mean embedding vector for the input sequence. Useful for
-    downstream tasks like sequence similarity, clustering, and classification.
+    NOTE: This tool is currently being migrated to a new backend.
+    It will return an error until the embeddings endpoint is configured
+    on the new server.
 
     Args:
         sequence: Protein amino acid sequence (single-letter codes).
                   Can include a FASTA header line starting with '>'.
-        model: ESMC model variant. Options:
-               - esmc-300m-2024-12 (fastest, smallest)
-               - esmc-600m-2024-12 (balanced, recommended)
-               - esmc-6b-2024-12 (most powerful, slowest)
     """
-    err = _validate_sequence(sequence)
-    if err:
-        return err
-
-    seq = _clean_sequence(sequence)
-
-    api_model = _EMBED_MODELS.get(model)
-    if api_model is None:
-        return (
-            f"Error: Invalid model '{model}'. "
-            f"Must be one of: {', '.join(sorted(_EMBED_MODELS))}"
-        )
-
-    if len(seq) > 2048:
-        return (
-            f"Error: Sequence is {len(seq)} residues. "
-            f"Maximum supported length is 2048 residues for API inference."
-        )
-
-    try:
-        from esm.sdk.api import (
-            ESMProtein,
-            ESMProteinError,
-            LogitsConfig,
-        )
-
-        client = _get_esmc_client(api_model)
-        protein = ESMProtein(sequence=seq)
-
-        # Encode the protein to tensor
-        protein_tensor = await asyncio.to_thread(client.encode, protein)
-        if isinstance(protein_tensor, ESMProteinError):
-            return f"Error encoding sequence: {protein_tensor.error_msg}"
-
-        # Get embeddings via logits endpoint
-        config = LogitsConfig(
-            sequence=True,
-            return_mean_embedding=True,
-        )
-        logits_output = await asyncio.to_thread(client.logits, protein_tensor, config)
-        if isinstance(logits_output, ESMProteinError):
-            return f"Error computing embeddings: {logits_output.error_msg}"
-
-        # Extract mean embedding
-        if logits_output.mean_embedding is not None:
-            import torch
-
-            emb = logits_output.mean_embedding
-            if isinstance(emb, torch.Tensor):
-                emb = emb.detach().cpu()
-                emb_list = emb.squeeze().tolist()
-            else:
-                emb_list = list(emb)
-
-            # Format output
-            dim = len(emb_list)
-            header = (
-                f"ESMC Protein Embedding\n"
-                f"  Model: {api_model}\n"
-                f"  Sequence length: {len(seq)} residues\n"
-                f"  Embedding dimension: {dim}\n\n"
-            )
-
-            # Return as JSON array for easy downstream use
-            emb_json = json.dumps(
-                [round(v, 6) for v in emb_list],
-            )
-            return header + f"Mean embedding vector ({dim}d):\n{emb_json}"
-        else:
-            return (
-                "Error: API did not return embeddings. "
-                "The model may not support this feature."
-            )
-
-    except ValueError as e:
-        return f"Error: {e}"
-    except Exception as e:
-        return f"Error computing embeddings: {type(e).__name__}: {e}"
+    return (
+        "Error: The ESM embeddings endpoint is not yet available on the new server. "
+        "This tool is being migrated. Please check back later or contact the admin."
+    )
